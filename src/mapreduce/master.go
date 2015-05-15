@@ -2,6 +2,7 @@ package mapreduce
 
 import "container/list"
 import "fmt"
+import "log"
 
 
 type WorkerInfo struct {
@@ -30,5 +31,47 @@ func (mr *MapReduce) KillWorkers() *list.List {
 
 func (mr *MapReduce) RunMaster() *list.List {
 	// Your code here
+	jobDoneChannel := make(chan bool)
+	for i := 0; i<mr.nMap; i++{
+		go func (mapJobNumber int) {
+			for{
+				worker := <-mr.registerChannel
+				args := &DoJobArgs{mr.file, Map, mapJobNumber, mr.nReduce}
+				reply := &DoJobReply{}
+				jobOK := call(worker,"Worker.DoJob",args,reply)
+				if(jobOK){
+					jobDoneChannel <- true
+					mr.registerChannel <- worker
+					return
+				}
+			}
+		}(i)
+	}
+	for i := 0; i<mr.nMap; i++{
+		<-jobDoneChannel
+		log.Printf("map job %d is done",i)
+	}
+	log.Printf("map job done")
+	for i := 0; i<mr.nReduce; i++{
+		go func (reduceJobNumber int) {
+			for{
+				worker := <-mr.registerChannel
+				args := &DoJobArgs{mr.file, Reduce, reduceJobNumber, mr.nMap}
+				reply := &DoJobReply{}
+				jobOK := call(worker,"Worker.DoJob",args,reply)
+				if(jobOK){
+					jobDoneChannel <- true
+					mr.registerChannel <- worker
+					return
+				}
+			}
+		}(i)
+	}
+	for i := 0; i<mr.nReduce; i++{
+		<-jobDoneChannel
+		log.Printf("reduce job %d is done",i)
+	}
+	log.Printf("reduce job done")
+
 	return mr.KillWorkers()
 }
