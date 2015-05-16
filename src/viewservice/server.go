@@ -16,8 +16,12 @@ type ViewServer struct {
 	rpccount int32 // for testing
 	me       string
 
-
 	// Your declarations here.
+	rpt      map[string]time.Time  //recent ping time from servers
+	curview  View  //current view
+	newview  View  //new view, become curview when ACKed 
+	ACKed    bool  //acked when received ping from cuurent view's primary
+	vol      string  //volunteer to be backup
 }
 
 //
@@ -26,6 +30,60 @@ type ViewServer struct {
 func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 
 	// Your code here.
+	vs.mu.Lock()
+	log.Printf("ping from %s, Viewnum=%d\n",args.Me,args.Viewnum)
+	if vs.curview.Viewnum == 0{  //no primary server has registered
+		if args.Viewnum == 0 {
+			vs.curview.Viewnum = 1
+			vs.curview.Primary = args.Me
+		}
+	}else{  //there must be a primary in current view
+		if args.Me == vs.curview.Primary {  //this ping comes from primary
+			if args.Viewnum == 0 {  //primary crash and reboot
+				if vs.ACKed==true{ // can switch to new view
+					vs.newview.Viewnum = vs.curview.Viewnum + 1
+					if vs.curview.Backup == ""{
+						vs.newview.Primary = args.Me
+					}else{
+						vs.newview.Primary = vs.curview.Backup
+						vs.newview.Backup = args.Me
+					}
+					vs.curview = vs.newview
+					vs.ACKed = false
+				}
+				//else{  //this is the case vs can not handle
+				//}
+			}else{  //must be args.Viewnum == vs.curview.Viewnum
+				if vs.ACKed == false{  //it is ACK for current view from primary
+					if vs.newview.Viewnum > vs.curview.Viewnum{  //need to switch to new view
+						vs.curview = vs.newview  //new view still not ACKed
+					}else{
+						vs.ACKed = true
+					}
+				}
+			}
+		}else if args.Me == vs.curview.Backup {  //ping from backup
+			if args.Viewnum==0 {  //backup crash and reboot
+				vs.ACKed = false
+			}
+		}else{  //ping comes from neithor primary nor backup
+			if args.Viewnum == 0 && vs.curview.Backup == ""{ //args.Me will become backup
+				vs.newview.Viewnum = vs.curview.Viewnum + 1
+				vs.newview.Backup = args.Me
+				vs.newview.Primary = vs.curview.Primary
+				if vs.ACKed == true{
+					vs.curview = vs.newview
+				}
+				vs.ACKed = false
+			}else if args.Viewnum == 0{  //volunteer
+				vs.vol = args.Me
+			}
+		}
+	}
+	log.Printf("curview: Viewnum=%d, p=%s, b=%s\n",vs.curview.Viewnum,vs.curview.Primary,vs.curview.Backup)
+	reply.View = vs.curview
+	vs.rpt[args.Me]=time.Now()
+	vs.mu.Unlock()
 
 	return nil
 }
@@ -36,6 +94,7 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 
 	// Your code here.
+	reply.View = vs.curview
 
 	return nil
 }
@@ -49,6 +108,43 @@ func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 func (vs *ViewServer) tick() {
 
 	// Your code here.
+	PrimaryInterval := time.Now().Sub(vs.rpt[vs.curview.Primary])
+	BackupInterval := time.Now().Sub(vs.rpt[vs.curview.Backup])
+	VolInterval := time.Now().Sub(vs.rpt[vs.vol])
+	if PrimaryInterval > DeadPings * PingInterval{  //Primary is dead
+		log.Printf("****primary failed*****\n")
+		vs.mu.Lock()
+		vs.newview.Viewnum = vs.curview.Viewnum + 1
+		vs.newview.Primary = vs.curview.Backup
+		if VolInterval < DeadPings * PingInterval{
+			vs.newview.Backup = vs.vol
+			vs.vol = ""
+		}else{
+			vs.newview.Backup = ""
+		}
+		if vs.ACKed == true{
+			vs.curview = vs.newview
+		}
+		vs.ACKed = false
+		vs.mu.Unlock()
+	}
+	if BackupInterval > DeadPings * PingInterval{
+		log.Printf("****backup failed*****\n")
+		vs.mu.Lock()
+		vs.newview.Viewnum = vs.curview.Viewnum + 1
+		vs.newview.Primary = vs.curview.Primary
+		if VolInterval < DeadPings * PingInterval {
+			vs.newview.Backup = vs.vol
+			vs.vol = ""
+		}else{
+			vs.newview.Backup = ""
+		}
+		if vs.ACKed == true{
+			vs.curview = vs.newview
+		}
+		vs.ACKed = false
+		vs.mu.Unlock()
+	}
 }
 
 //
@@ -77,6 +173,11 @@ func StartServer(me string) *ViewServer {
 	vs := new(ViewServer)
 	vs.me = me
 	// Your vs.* initializations here.
+	vs.rpt = make(map[string]time.Time)
+	vs.curview = View{}
+	vs.newview = View{}
+	vs.ACKed = false
+	vs.vol = ""
 
 	// tell net/rpc about our RPC server and handlers.
 	rpcs := rpc.NewServer()
