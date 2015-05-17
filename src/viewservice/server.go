@@ -20,8 +20,9 @@ type ViewServer struct {
 	rpt      map[string]time.Time  //recent ping time from servers
 	curview  View  //current view
 	newview  View  //new view, become curview when ACKed 
-	ACKed    bool  //acked when received ping from cuurent view's primary
-	vol      string  //volunteer to be backup
+	ACKed bool  //newview is acked or not
+	backupdead  bool  //backup is dead
+	primarydead  bool  //primary is dead
 }
 
 //
@@ -30,61 +31,72 @@ type ViewServer struct {
 func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 
 	// Your code here.
-	vs.mu.Lock()
 	log.Printf("ping from %s, Viewnum=%d\n",args.Me,args.Viewnum)
+	vs.mu.Lock()
 	if vs.curview.Viewnum == 0{  //no primary server has registered
-		if args.Viewnum == 0 {
-			vs.curview.Viewnum = 1
-			vs.curview.Primary = args.Me
-		}
+		vs.newview.Viewnum = 1
+		vs.newview.Primary = args.Me
+		vs.newview.Backup = ""
+		vs.ACKed = true
 	}else{  //there must be a primary in current view
-		if args.Me == vs.curview.Primary {  //this ping comes from primary
+		if args.Me == vs.curview.Primary{  //this ping comes from primary
 			if args.Viewnum == 0 {  //primary crash and reboot
-				if vs.ACKed==true{ // can switch to new view
-					vs.newview.Viewnum = vs.curview.Viewnum + 1
-					if vs.curview.Backup == ""{
-						vs.newview.Primary = args.Me
-					}else{
-						vs.newview.Primary = vs.curview.Backup
-						vs.newview.Backup = args.Me
-					}
-					vs.curview = vs.newview
-					vs.ACKed = false
+				vs.newview.Viewnum = vs.curview.Viewnum + 1
+				if vs.curview.Backup == ""{
+					vs.newview.Primary = args.Me
+					vs.newview.Backup = ""
+				}else{
+					vs.newview.Primary = vs.curview.Backup
+					vs.newview.Backup = args.Me
 				}
-				//else{  //this is the case vs can not handle
-				//}
-			}else{  //must be args.Viewnum == vs.curview.Viewnum
-				if vs.ACKed == false{  //it is ACK for current view from primary
-					if vs.newview.Viewnum > vs.curview.Viewnum{  //need to switch to new view
-						vs.curview = vs.newview  //new view still not ACKed
-					}else{
-						vs.ACKed = true
-					}
-				}
+				vs.primarydead = false
+			}else if vs.backupdead == true{
+				vs.newview.Viewnum = vs.curview.Viewnum + 1
+				vs.newview.Primary = vs.curview.Primary
+				vs.newview.Backup = ""
+				vs.backupdead = false
 			}
-		}else if args.Me == vs.curview.Backup {  //ping from backup
+		}else if args.Me == vs.curview.Backup{  //ping from backup
 			if args.Viewnum==0 {  //backup crash and reboot
-				vs.ACKed = false
+				vs.backupdead = false
+				vs.newview.Viewnum = vs.curview.Viewnum + 1
+				vs.newview.Primary = vs.curview.Primary
+				vs.newview.Backup = args.Me
+			}else if vs.primarydead == true{
+				vs.newview.Viewnum = vs.curview.Viewnum + 1
+				vs.newview.Primary = vs.curview.Backup
+				vs.newview.Backup = ""
+				vs.primarydead = false
 			}
 		}else{  //ping comes from neithor primary nor backup
-			if args.Viewnum == 0 && vs.curview.Backup == ""{ //args.Me will become backup
+			if args.Viewnum == 0 && (vs.curview.Backup == "" || vs.backupdead==true) { //args.Me will become backup
 				vs.newview.Viewnum = vs.curview.Viewnum + 1
 				vs.newview.Backup = args.Me
 				vs.newview.Primary = vs.curview.Primary
-				if vs.ACKed == true{
-					vs.curview = vs.newview
+			}else if args.Viewnum == 0 && vs.primarydead == true{
+				if vs.curview.Backup != ""{
+					vs.newview.Viewnum = vs.curview.Viewnum + 1
+					vs.newview.Backup = args.Me
+					vs.newview.Primary = vs.curview.Backup
+				}else{
+					vs.newview.Viewnum = vs.curview.Viewnum + 1
+					vs.newview.Backup = ""
+					vs.newview.Primary = args.Me
 				}
-				vs.ACKed = false
-			}else if args.Viewnum == 0{  //volunteer
-				vs.vol = args.Me
+				vs.primarydead = false
 			}
 		}
 	}
-	log.Printf("curview: Viewnum=%d, p=%s, b=%s\n",vs.curview.Viewnum,vs.curview.Primary,vs.curview.Backup)
+	if (args.Me == vs.curview.Primary || vs.ACKed == true) && vs.newview.Viewnum > vs.curview.Viewnum{
+		vs.curview = vs.newview
+		vs.ACKed = false
+	}else if args.Me == vs.curview.Primary && args.Viewnum == vs.curview.Viewnum{
+		vs.ACKed = true
+	}
 	reply.View = vs.curview
 	vs.rpt[args.Me]=time.Now()
 	vs.mu.Unlock()
-
+	log.Printf("curview: Viewnum=%d, p=%s, b=%s, acked=%b\n",vs.curview.Viewnum,vs.curview.Primary,vs.curview.Backup,vs.ACKed)
 	return nil
 }
 
@@ -110,39 +122,16 @@ func (vs *ViewServer) tick() {
 	// Your code here.
 	PrimaryInterval := time.Now().Sub(vs.rpt[vs.curview.Primary])
 	BackupInterval := time.Now().Sub(vs.rpt[vs.curview.Backup])
-	VolInterval := time.Now().Sub(vs.rpt[vs.vol])
-	if PrimaryInterval > DeadPings * PingInterval{  //Primary is dead
+	if vs.curview.Primary != "" && PrimaryInterval > DeadPings * PingInterval{  //Primary is dead
 		log.Printf("****primary failed*****\n")
 		vs.mu.Lock()
-		vs.newview.Viewnum = vs.curview.Viewnum + 1
-		vs.newview.Primary = vs.curview.Backup
-		if VolInterval < DeadPings * PingInterval{
-			vs.newview.Backup = vs.vol
-			vs.vol = ""
-		}else{
-			vs.newview.Backup = ""
-		}
-		if vs.ACKed == true{
-			vs.curview = vs.newview
-		}
-		vs.ACKed = false
+		vs.primarydead = true
 		vs.mu.Unlock()
 	}
-	if BackupInterval > DeadPings * PingInterval{
+	if vs.curview.Backup != "" && BackupInterval > DeadPings * PingInterval{  //Backup is dead
 		log.Printf("****backup failed*****\n")
 		vs.mu.Lock()
-		vs.newview.Viewnum = vs.curview.Viewnum + 1
-		vs.newview.Primary = vs.curview.Primary
-		if VolInterval < DeadPings * PingInterval {
-			vs.newview.Backup = vs.vol
-			vs.vol = ""
-		}else{
-			vs.newview.Backup = ""
-		}
-		if vs.ACKed == true{
-			vs.curview = vs.newview
-		}
-		vs.ACKed = false
+		vs.backupdead = true
 		vs.mu.Unlock()
 	}
 }
@@ -177,7 +166,8 @@ func StartServer(me string) *ViewServer {
 	vs.curview = View{}
 	vs.newview = View{}
 	vs.ACKed = false
-	vs.vol = ""
+	vs.backupdead = false
+	vs.primarydead = false
 
 	// tell net/rpc about our RPC server and handlers.
 	rpcs := rpc.NewServer()
