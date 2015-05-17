@@ -20,7 +20,7 @@ type ViewServer struct {
 	rpt      map[string]time.Time  //recent ping time from servers
 	curview  View  //current view
 	newview  View  //new view, become curview when ACKed 
-	ACKed bool  //newview is acked or not
+	ACKed bool  //current view is acked by primary
 	backupdead  bool  //backup is dead
 	primarydead  bool  //primary is dead
 }
@@ -73,16 +73,10 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 				vs.newview.Viewnum = vs.curview.Viewnum + 1
 				vs.newview.Backup = args.Me
 				vs.newview.Primary = vs.curview.Primary
-			}else if args.Viewnum == 0 && vs.primarydead == true{
-				if vs.curview.Backup != ""{
-					vs.newview.Viewnum = vs.curview.Viewnum + 1
-					vs.newview.Backup = args.Me
-					vs.newview.Primary = vs.curview.Backup
-				}else{
-					vs.newview.Viewnum = vs.curview.Viewnum + 1
-					vs.newview.Backup = ""
-					vs.newview.Primary = args.Me
-				}
+			}else if args.Viewnum == 0 && vs.primarydead == true && vs.curview.Backup != ""{ //idle server can't be primary
+				vs.newview.Viewnum = vs.curview.Viewnum + 1
+				vs.newview.Backup = args.Me
+				vs.newview.Primary = vs.curview.Backup
 				vs.primarydead = false
 			}
 		}
