@@ -31,7 +31,7 @@ type ViewServer struct {
 func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 
 	// Your code here.
-	log.Printf("ping from %s, Viewnum=%d\n",args.Me,args.Viewnum)
+	//log.Printf("ping from %s, Viewnum=%d\n",args.Me,args.Viewnum)
 	vs.mu.Lock()
 	if vs.curview.Viewnum == 0{  //no primary server has registered
 		vs.newview.Viewnum = 1
@@ -90,7 +90,7 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 	reply.View = vs.curview
 	vs.rpt[args.Me]=time.Now()
 	vs.mu.Unlock()
-	log.Printf("curview: Viewnum=%d, p=%s, b=%s, acked=%b\n",vs.curview.Viewnum,vs.curview.Primary,vs.curview.Backup,vs.ACKed)
+	//log.Printf("curview: Viewnum=%d, p=%s, b=%s, acked=%b\n",vs.curview.Viewnum,vs.curview.Primary,vs.curview.Backup,vs.ACKed)
 	return nil
 }
 
@@ -117,13 +117,13 @@ func (vs *ViewServer) tick() {
 	PrimaryInterval := time.Now().Sub(vs.rpt[vs.curview.Primary])
 	BackupInterval := time.Now().Sub(vs.rpt[vs.curview.Backup])
 	if vs.curview.Primary != "" && PrimaryInterval > DeadPings * PingInterval{  //Primary is dead
-		log.Printf("****primary failed*****\n")
+		//log.Printf("****primary failed*****\n")
 		vs.mu.Lock()
 		vs.primarydead = true
 		vs.mu.Unlock()
 	}
 	if vs.curview.Backup != "" && BackupInterval > DeadPings * PingInterval{  //Backup is dead
-		log.Printf("****backup failed*****\n")
+		//log.Printf("****backup failed*****\n")
 		vs.mu.Lock()
 		vs.backupdead = true
 		vs.mu.Unlock()

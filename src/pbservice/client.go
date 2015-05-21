@@ -3,6 +3,7 @@ package pbservice
 import "viewservice"
 import "net/rpc"
 import "fmt"
+import "time"
 
 import "crypto/rand"
 import "math/big"
@@ -11,6 +12,8 @@ import "math/big"
 type Clerk struct {
 	vs *viewservice.Clerk
 	// Your declarations here
+	ps string  //primary server for key/value server
+	id int64  //client's identifier, randomly generated, for at-most-once
 }
 
 // this may come in handy.
@@ -25,6 +28,9 @@ func MakeClerk(vshost string, me string) *Clerk {
 	ck := new(Clerk)
 	ck.vs = viewservice.MakeClerk(me, vshost)
 	// Your ck.* initializations here
+	v, _ := ck.vs.Get()
+	ck.ps = v.Primary
+	ck.id = nrand()
 
 	return ck
 }
@@ -64,6 +70,15 @@ func call(srv string, rpcname string,
 	return false
 }
 
+//handler function for keeping retring
+func (ck *Clerk) Operate(rpcname string, args interface{}, reply interface{}){
+	for call(ck.ps, rpcname, args, reply) == false{
+		v, _ := ck.vs.Get()
+		ck.ps = v.Primary
+		time.Sleep(viewservice.PingInterval)
+	}
+}
+
 //
 // fetch a key's value from the current primary;
 // if they key has never been set, return "".
@@ -74,8 +89,13 @@ func call(srv string, rpcname string,
 func (ck *Clerk) Get(key string) string {
 
 	// Your code here.
-
-	return "???"
+	args := &GetArgs{key, nrand(), ck.id}
+	reply := &GetReply{}
+	ck.Operate("PBServer.Get", args, reply)
+    if reply.Err == ErrWrongServer{  //in case connect to a non-primary server
+		ck.Operate("PBServer.Get", args, reply)
+	}
+	return reply.Value
 }
 
 //
@@ -84,7 +104,14 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	// Your code here.
+	args := &PutAppendArgs{key, value, op, false, nrand(), ck.id}
+	reply := &PutAppendReply{}
+	ck.Operate("PBServer.PutAppend", args, reply)
+    if reply.Err == ErrWrongServer{
+		ck.Operate("PBServer.PutAppend", args, reply)
+	}
 }
+
 
 //
 // tell the primary to update key's value.
