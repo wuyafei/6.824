@@ -65,6 +65,7 @@ type PrepReply struct{
 	Resp     int      //ok, reject 
 	N_a      int64    //acceptor's n_a
 	V_a      interface{}    //acceptor's v_a
+	MaxForgotten    int
 }
 
 type AcptArgs struct{
@@ -75,13 +76,6 @@ type AcptArgs struct{
 
 type AcptReply struct{
 	Resp     int      //ok, reject 
-}
-
-type ForgottenArgs struct{
-
-}
-
-type ForgottenReply struct{
 	MaxForgotten    int
 }
 
@@ -97,7 +91,7 @@ type Paxos struct {
 	// Your data here.
 	Agrees    map[int]*Agreement     //map from seq => Agreement
 	pn        int      //number of peers, used for generate different N
-	MinForgotten  int
+	Dones      []int   //record for Done
 
 }
 
@@ -141,15 +135,14 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 func (px *Paxos) proposer(seq int, v interface{}) {
 	for{
 		agre, exists := px.Agrees[seq]
-		if exists && agre.State==Decided{
+		if exists && (agre.State==Decided || agre.State==Forgotten){
 			break
 		}
 		n := time.Now().Unix()*int64(px.pn) + int64(px.me);
 		cnt := 0
 		var max_n_a int64 = 0
 		ret_v := v
-		//fmt.Printf("%v :starting prepare, seq: %v, N:%v, pn:%v\n", px.me, seq, n, px.pn)
-		for i:=0;i<px.pn;i++{
+		for i:=0;i<px.pn;i++{       //starting prepare here
 			args := &PrepArgs{seq, n}
 			reply := &PrepReply{}
 			if i == px.me {
@@ -157,20 +150,22 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 			}else{
 				call(px.peers[i], "Paxos.Prepare", args, reply)
 			}
+			if reply.MaxForgotten > px.Dones[i]{      //update Dones
+				px.Dones[i]=reply.MaxForgotten
+			}
 			if reply.Resp == OK{
 				cnt++
 				if reply.N_a > max_n_a{
 					max_n_a = reply.N_a
 					ret_v = reply.V_a
 				}
-				if cnt > px.pn/2 {
+				if cnt > px.pn/2 {     //majority prepare_ok
 					break
 				}
 			}
 		}
 		if cnt>px.pn/2{     //prepare ok, start sending accept
 			cnt = 0
-			//fmt.Printf("%v: starting accept, seq: %v, N:%v, V:%v\n", px.me,seq, n, ret_v)
 			for i:=0;i<px.pn;i++{
 				args := &AcptArgs{seq, n, ret_v}
 				reply := &AcptReply{}
@@ -179,17 +174,18 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 				}else{
 					call(px.peers[i], "Paxos.Accept", args, reply)
 				}
-				//fmt.Printf("i:%v, resp:%v\n", i, reply.Resp)
+				if reply.MaxForgotten > px.Dones[i]{
+					px.Dones[i]=reply.MaxForgotten
+				}
 				if reply.Resp == OK{
 					cnt++
-					if cnt > px.pn/2 {
+					if cnt > px.pn/2 {    //majority accept_ok
 						break
 					}
 				}
 			}
 		}
 		if cnt>px.pn/2{     //accept ok, start sending decide
-			//fmt.Printf("%v: starting decide, seq: %v, N:%v, V:%v\n", px.me, seq, n, ret_v)
 			for i:=0;i<px.pn;i++{
 				args := &AcptArgs{seq, n, ret_v}
 				reply := &AcptReply{}
@@ -198,15 +194,22 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 				}else{
 					call(px.peers[i], "Paxos.Decide", args, reply)
 				}
+				//here we don't care if we get majority decide_ok
+
+				if reply.MaxForgotten > px.Dones[i]{
+					px.Dones[i]=reply.MaxForgotten
+				}
 			}
 			break
 		}
+		//if prepare or accpet did not get majority ok, we wait for a random time to re_prepare/accept
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 		tt := time.Duration(r.Intn(20)) * time.Millisecond
 		time.Sleep(tt)
 	}
 }
 
+//handler of acceptor's prepare
 func (px *Paxos) Prepare(args *PrepArgs, reply *PrepReply) error{
 	px.mu.Lock()
 	_, exists := px.Agrees[args.Seq]
@@ -223,10 +226,12 @@ func (px *Paxos) Prepare(args *PrepArgs, reply *PrepReply) error{
 	}else{
 		reply.Resp = Reject
 	}
+	reply.MaxForgotten= px.Dones[px.me]
 	px.mu.Unlock()
 	return nil
 }
 
+//handler of acceptor's accept
 func (px *Paxos) Accept(args *AcptArgs, reply *AcptReply) error{
 	px.mu.Lock()
 	_, exists := px.Agrees[args.Seq]
@@ -241,10 +246,12 @@ func (px *Paxos) Accept(args *AcptArgs, reply *AcptReply) error{
 	}else{
 		reply.Resp = Reject
 	}
+	reply.MaxForgotten= px.Dones[px.me]
 	px.mu.Unlock()
 	return nil
 }
 
+//handler of decide
 func (px *Paxos) Decide(args *AcptArgs, reply *AcptReply) error{
 	px.mu.Lock()
 	_, exists := px.Agrees[args.Seq]
@@ -258,19 +265,8 @@ func (px *Paxos) Decide(args *AcptArgs, reply *AcptReply) error{
 	}
 	//fmt.Printf("i:%v, decided! seq: %v\n",px.me, args.Seq)
 	reply.Resp = OK
+	reply.MaxForgotten= px.Dones[px.me]
 	px.mu.Unlock()
-	return nil
-}
-
-func (px *Paxos) Forget(args *ForgottenArgs, reply *ForgottenReply) error{
-	reply.MaxForgotten= px.MinForgotten
-	for k,v := range px.Agrees{
-		//fmt.Printf("#########range %v, %v:%v\n",px.me, k, v)
-		if v.State == Forgotten && k > reply.MaxForgotten{
-			reply.MaxForgotten= k
-		}
-	}
-	//fmt.Printf("*********Min:  %v:%v\n", px.me, reply.MaxForgotten)
 	return nil
 }
 
@@ -299,12 +295,16 @@ func (px *Paxos) Start(seq int, v interface{}) {
 //
 func (px *Paxos) Done(seq int) {
 	// Your code here.
+	if seq < px.Dones[px.me]{
+		return
+	}
 	px.mu.Lock()
 	for key,_ := range px.Agrees{
 		if key<=seq{
 			px.Agrees[key].State = Forgotten
 		}
 	}
+	px.Dones[px.me]=seq
 	px.mu.Unlock()
 }
 
@@ -315,7 +315,7 @@ func (px *Paxos) Done(seq int) {
 //
 func (px *Paxos) Max() int {
 	// Your code here.
-	max := px.MinForgotten
+	max := px.Dones[px.me]
 	for key,_ := range px.Agrees{
 		if key> max{
 			max = key
@@ -354,37 +354,18 @@ func (px *Paxos) Max() int {
 //
 func (px *Paxos) Min() int {
 	// You code here.
-	args := &ForgottenArgs{}
-	reply := &ForgottenReply{}
-	px.Forget(args, reply)
-	min_fgot := reply.MaxForgotten
-	ok := true
+	min_fgot := px.Dones[px.me]
 	for i:=0;i<px.pn;i++{
-		args = &ForgottenArgs{}
-		reply = &ForgottenReply{}
-		if i==px.me{
-			continue
-		}else{
-			ok = call(px.peers[i], "Paxos.Forget", args, reply)
-			if !ok || reply.MaxForgotten == -1{
-				min_fgot = -1
-				break
-			}
-		}
-		if min_fgot > reply.MaxForgotten{
-			min_fgot = reply.MaxForgotten
+		if min_fgot > px.Dones[i]{
+			min_fgot = px.Dones[i]
 		}
 	}
-	//fmt.Printf("------Min:  %v:%v\n", px.me, reply.MaxForgotten)
 	px.mu.Lock()
-	if ok  && reply.MaxForgotten != -1{
-		for k,_ := range px.Agrees{
-			if k<= min_fgot {
-				delete(px.Agrees, k)
-			}
+	for k,_ := range px.Agrees{
+		if k<= min_fgot {
+			delete(px.Agrees, k)
 		}
 	}
-	px.MinForgotten = min_fgot
 	px.mu.Unlock()
 	return min_fgot+1
 }
@@ -456,7 +437,10 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 	// Your initialization code here.
 	px.Agrees = make(map[int]*Agreement)
 	px.pn = len(peers)
-	px.MinForgotten = -1
+	px.Dones = make([]int, px.pn)
+	for i:=0;i<px.pn;i++{
+		px.Dones[i] = -1
+	}
 
 	if rpcs != nil {
 		// caller will create socket &c
