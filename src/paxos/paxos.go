@@ -146,37 +146,17 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 		}
 		n := time.Now().Unix()*int64(px.pn) + int64(px.me);
 		cnt := 0
-		answered := make(map[int]bool,px.pn)
-		i := 0
-		answered_cnt := 0
 		var max_n_a int64 = 0
 		ret_v := v
-		fmt.Printf("%v :starting prepare, seq: %v, N:%v, pn:%v\n", px.me, seq, n, px.pn)
-		for {
-			agre, exists = px.Agrees[seq]
-			if exists && agre.State==Decided{
-				return
-			}
-			fmt.Printf("%v:%v, answered:%v\n",px.me, i, answered[i])
-			if answered[i] {
-				i=(i+1)%px.pn
-				continue
-			}
+		//fmt.Printf("%v :starting prepare, seq: %v, N:%v, pn:%v\n", px.me, seq, n, px.pn)
+		for i:=0;i<px.pn;i++{
 			args := &PrepArgs{seq, n}
 			reply := &PrepReply{}
 			if i == px.me {
 				px.Prepare(args, reply)
-				answered[i]=true
-				answered_cnt++
 			}else{
-				answered[i] = call(px.peers[i], "Paxos.Prepare", args, reply)
-				if answered[i]{
-					answered_cnt++
-				}else{
-					time.Sleep(10*time.Millisecond)
-				}
+				call(px.peers[i], "Paxos.Prepare", args, reply)
 			}
-			//fmt.Printf("me:%v i:%v, resp:%v, N_a:%v, V_a:%v\n", px.me, i, reply.Resp, reply.N_a, reply.V_a)
 			if reply.Resp == OK{
 				cnt++
 				if reply.N_a > max_n_a{
@@ -187,41 +167,17 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 					break
 				}
 			}
-			fmt.Printf("%v:%v, cnt: %v, answered_cnt: %v, answered[%v]: %v, resp=%v\n", px.me, i, cnt, answered_cnt,i, answered[i], reply.Resp)
-			if px.pn-answered_cnt+cnt <= px.pn/2 {
-				break
-			}
-			i=(i+1)%px.pn
-			fmt.Printf("%v: %v\n", px.me, i)
 		}
 		if cnt>px.pn/2{     //prepare ok, start sending accept
-			answered = make(map[int]bool,px.pn)
-			i = 0
-			answered_cnt = 0
 			cnt = 0
-			fmt.Printf("%v: starting accept, seq: %v, N:%v, V:%v\n", px.me,seq, n, ret_v)
-			for {
-				agre, exists = px.Agrees[seq]
-				if exists && agre.State==Decided{
-					return
-				}
-				if answered[i] {
-					i=(i+1)%px.pn
-					continue
-				}
+			//fmt.Printf("%v: starting accept, seq: %v, N:%v, V:%v\n", px.me,seq, n, ret_v)
+			for i:=0;i<px.pn;i++{
 				args := &AcptArgs{seq, n, ret_v}
 				reply := &AcptReply{}
 				if i == px.me {
 					px.Accept(args, reply)
-					answered[i]=true
-					answered_cnt++
 				}else{
-					answered[i] = call(px.peers[i], "Paxos.Accept", args, reply)
-					if answered[i]{
-						answered_cnt++
-					}else{
-						time.Sleep(10*time.Millisecond)
-					}
+					call(px.peers[i], "Paxos.Accept", args, reply)
 				}
 				//fmt.Printf("i:%v, resp:%v\n", i, reply.Resp)
 				if reply.Resp == OK{
@@ -230,16 +186,11 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 						break
 					}
 				}
-				if px.pn-answered_cnt+cnt <= px.pn/2 {
-					break
-				}
-				//fmt.Printf("cnt: %v, answered_cnt: %v, answered[%v]: %v\n", cnt, answered_cnt,i, answered[i])
-				i=(i+1)%px.pn
 			}
 		}
 		if cnt>px.pn/2{     //accept ok, start sending decide
-			fmt.Printf("%v: starting decide, seq: %v, N:%v, V:%v\n", px.me, seq, n, ret_v)
-			for i=0;i<px.pn;i++{
+			//fmt.Printf("%v: starting decide, seq: %v, N:%v, V:%v\n", px.me, seq, n, ret_v)
+			for i:=0;i<px.pn;i++{
 				args := &AcptArgs{seq, n, ret_v}
 				reply := &AcptReply{}
 				if i==px.me{
@@ -250,6 +201,9 @@ func (px *Paxos) proposer(seq int, v interface{}) {
 			}
 			break
 		}
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		tt := time.Duration(r.Intn(20)) * time.Millisecond
+		time.Sleep(tt)
 	}
 }
 
@@ -302,7 +256,7 @@ func (px *Paxos) Decide(args *AcptArgs, reply *AcptReply) error{
 		px.Agrees[args.Seq].N_a = args.N
 		px.Agrees[args.Seq].V_a = args.V
 	}
-	fmt.Printf("i:%v, decided! seq: %v\n",px.me, args.Seq)
+	//fmt.Printf("i:%v, decided! seq: %v\n",px.me, args.Seq)
 	reply.Resp = OK
 	px.mu.Unlock()
 	return nil
