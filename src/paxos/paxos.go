@@ -30,7 +30,7 @@ import "sync"
 import "sync/atomic"
 import "fmt"
 import "math/rand"
-
+import "time"
 
 // px.Status() return values, indicating
 // whether an agreement has been decided,
@@ -44,6 +44,47 @@ const (
 	Forgotten      // decided but forgotten.
 )
 
+const (
+	OK = 1
+	Reject = 2
+)
+
+type Agreement struct {
+	State    Fate
+	N_p      int64
+	N_a      int64
+	V_a      interface{}
+}
+
+type PrepArgs struct{
+	Seq    int    //seq number of agreement instance
+	N        int64    //prepare number
+}
+
+type PrepReply struct{
+	Resp     int      //ok, reject 
+	N_a      int64    //acceptor's n_a
+	V_a      interface{}    //acceptor's v_a
+}
+
+type AcptArgs struct{
+	Seq    int
+	N        int64
+	V        interface{}     //accept value
+}
+
+type AcptReply struct{
+	Resp     int      //ok, reject 
+}
+
+type ForgottenArgs struct{
+
+}
+
+type ForgottenReply struct{
+	MaxForgotten    int
+}
+
 type Paxos struct {
 	mu         sync.Mutex
 	l          net.Listener
@@ -53,8 +94,11 @@ type Paxos struct {
 	peers      []string
 	me         int // index into peers[]
 
-
 	// Your data here.
+	Agrees    map[int]*Agreement     //map from seq => Agreement
+	pn        int      //number of peers, used for generate different N
+	MinForgotten  int
+
 }
 
 //
@@ -94,6 +138,188 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 }
 
 
+func (px *Paxos) proposer(seq int, v interface{}) {
+	for{
+		agre, exists := px.Agrees[seq]
+		if exists && agre.State==Decided{
+			break
+		}
+		n := time.Now().Unix()*int64(px.pn) + int64(px.me);
+		cnt := 0
+		answered := make(map[int]bool,px.pn)
+		i := 0
+		answered_cnt := 0
+		var max_n_a int64 = 0
+		ret_v := v
+		fmt.Printf("%v :starting prepare, seq: %v, N:%v, pn:%v\n", px.me, seq, n, px.pn)
+		for {
+			agre, exists = px.Agrees[seq]
+			if exists && agre.State==Decided{
+				return
+			}
+			fmt.Printf("%v:%v, answered:%v\n",px.me, i, answered[i])
+			if answered[i] {
+				i=(i+1)%px.pn
+				continue
+			}
+			args := &PrepArgs{seq, n}
+			reply := &PrepReply{}
+			if i == px.me {
+				px.Prepare(args, reply)
+				answered[i]=true
+				answered_cnt++
+			}else{
+				answered[i] = call(px.peers[i], "Paxos.Prepare", args, reply)
+				if answered[i]{
+					answered_cnt++
+				}else{
+					time.Sleep(10*time.Millisecond)
+				}
+			}
+			//fmt.Printf("me:%v i:%v, resp:%v, N_a:%v, V_a:%v\n", px.me, i, reply.Resp, reply.N_a, reply.V_a)
+			if reply.Resp == OK{
+				cnt++
+				if reply.N_a > max_n_a{
+					max_n_a = reply.N_a
+					ret_v = reply.V_a
+				}
+				if cnt > px.pn/2 {
+					break
+				}
+			}
+			fmt.Printf("%v:%v, cnt: %v, answered_cnt: %v, answered[%v]: %v, resp=%v\n", px.me, i, cnt, answered_cnt,i, answered[i], reply.Resp)
+			if px.pn-answered_cnt+cnt <= px.pn/2 {
+				break
+			}
+			i=(i+1)%px.pn
+			fmt.Printf("%v: %v\n", px.me, i)
+		}
+		if cnt>px.pn/2{     //prepare ok, start sending accept
+			answered = make(map[int]bool,px.pn)
+			i = 0
+			answered_cnt = 0
+			cnt = 0
+			fmt.Printf("%v: starting accept, seq: %v, N:%v, V:%v\n", px.me,seq, n, ret_v)
+			for {
+				agre, exists = px.Agrees[seq]
+				if exists && agre.State==Decided{
+					return
+				}
+				if answered[i] {
+					i=(i+1)%px.pn
+					continue
+				}
+				args := &AcptArgs{seq, n, ret_v}
+				reply := &AcptReply{}
+				if i == px.me {
+					px.Accept(args, reply)
+					answered[i]=true
+					answered_cnt++
+				}else{
+					answered[i] = call(px.peers[i], "Paxos.Accept", args, reply)
+					if answered[i]{
+						answered_cnt++
+					}else{
+						time.Sleep(10*time.Millisecond)
+					}
+				}
+				//fmt.Printf("i:%v, resp:%v\n", i, reply.Resp)
+				if reply.Resp == OK{
+					cnt++
+					if cnt > px.pn/2 {
+						break
+					}
+				}
+				if px.pn-answered_cnt+cnt <= px.pn/2 {
+					break
+				}
+				//fmt.Printf("cnt: %v, answered_cnt: %v, answered[%v]: %v\n", cnt, answered_cnt,i, answered[i])
+				i=(i+1)%px.pn
+			}
+		}
+		if cnt>px.pn/2{     //accept ok, start sending decide
+			fmt.Printf("%v: starting decide, seq: %v, N:%v, V:%v\n", px.me, seq, n, ret_v)
+			for i=0;i<px.pn;i++{
+				args := &AcptArgs{seq, n, ret_v}
+				reply := &AcptReply{}
+				if i==px.me{
+					px.Decide(args, reply)
+				}else{
+					call(px.peers[i], "Paxos.Decide", args, reply)
+				}
+			}
+			break
+		}
+	}
+}
+
+func (px *Paxos) Prepare(args *PrepArgs, reply *PrepReply) error{
+	px.mu.Lock()
+	_, exists := px.Agrees[args.Seq]
+	if !exists{
+		px.Agrees[args.Seq] = &Agreement{State:Pending, N_p:args.N}
+		reply.Resp = OK
+		reply.N_a = 0
+		reply.V_a = px.Agrees[args.Seq].V_a
+	}else if args.N > px.Agrees[args.Seq].N_p {
+		px.Agrees[args.Seq].N_p = args.N
+		reply.Resp = OK
+		reply.N_a = px.Agrees[args.Seq].N_a
+		reply.V_a = px.Agrees[args.Seq].V_a
+	}else{
+		reply.Resp = Reject
+	}
+	px.mu.Unlock()
+	return nil
+}
+
+func (px *Paxos) Accept(args *AcptArgs, reply *AcptReply) error{
+	px.mu.Lock()
+	_, exists := px.Agrees[args.Seq]
+	if !exists{
+		px.Agrees[args.Seq] = &Agreement{State:Pending, N_p:args.N, N_a:args.N, V_a:args.V}
+		reply.Resp = OK
+	}else if args.N >= px.Agrees[args.Seq].N_p {
+		px.Agrees[args.Seq].N_p = args.N
+		px.Agrees[args.Seq].N_a = args.N
+		px.Agrees[args.Seq].V_a = args.V
+		reply.Resp = OK
+	}else{
+		reply.Resp = Reject
+	}
+	px.mu.Unlock()
+	return nil
+}
+
+func (px *Paxos) Decide(args *AcptArgs, reply *AcptReply) error{
+	px.mu.Lock()
+	_, exists := px.Agrees[args.Seq]
+	if !exists{
+		px.Agrees[args.Seq] = &Agreement{State:Decided, N_p:args.N, N_a:args.N, V_a:args.V}
+	}else {
+		px.Agrees[args.Seq].State = Decided
+		px.Agrees[args.Seq].N_p = args.N
+		px.Agrees[args.Seq].N_a = args.N
+		px.Agrees[args.Seq].V_a = args.V
+	}
+	fmt.Printf("i:%v, decided! seq: %v\n",px.me, args.Seq)
+	reply.Resp = OK
+	px.mu.Unlock()
+	return nil
+}
+
+func (px *Paxos) Forget(args *ForgottenArgs, reply *ForgottenReply) error{
+	reply.MaxForgotten= px.MinForgotten
+	for k,v := range px.Agrees{
+		//fmt.Printf("#########range %v, %v:%v\n",px.me, k, v)
+		if v.State == Forgotten && k > reply.MaxForgotten{
+			reply.MaxForgotten= k
+		}
+	}
+	//fmt.Printf("*********Min:  %v:%v\n", px.me, reply.MaxForgotten)
+	return nil
+}
+
 //
 // the application wants paxos to start agreement on
 // instance seq, with proposed value v.
@@ -103,6 +329,12 @@ func call(srv string, name string, args interface{}, reply interface{}) bool {
 //
 func (px *Paxos) Start(seq int, v interface{}) {
 	// Your code here.
+	if seq < px.Min(){
+		return
+	}
+	go func(){
+		px.proposer(seq, v)
+	}()
 }
 
 //
@@ -113,6 +345,13 @@ func (px *Paxos) Start(seq int, v interface{}) {
 //
 func (px *Paxos) Done(seq int) {
 	// Your code here.
+	px.mu.Lock()
+	for key,_ := range px.Agrees{
+		if key<=seq{
+			px.Agrees[key].State = Forgotten
+		}
+	}
+	px.mu.Unlock()
 }
 
 //
@@ -122,7 +361,13 @@ func (px *Paxos) Done(seq int) {
 //
 func (px *Paxos) Max() int {
 	// Your code here.
-	return 0
+	max := px.MinForgotten
+	for key,_ := range px.Agrees{
+		if key> max{
+			max = key
+		}
+	}
+	return max
 }
 
 //
@@ -155,7 +400,39 @@ func (px *Paxos) Max() int {
 //
 func (px *Paxos) Min() int {
 	// You code here.
-	return 0
+	args := &ForgottenArgs{}
+	reply := &ForgottenReply{}
+	px.Forget(args, reply)
+	min_fgot := reply.MaxForgotten
+	ok := true
+	for i:=0;i<px.pn;i++{
+		args = &ForgottenArgs{}
+		reply = &ForgottenReply{}
+		if i==px.me{
+			continue
+		}else{
+			ok = call(px.peers[i], "Paxos.Forget", args, reply)
+			if !ok || reply.MaxForgotten == -1{
+				min_fgot = -1
+				break
+			}
+		}
+		if min_fgot > reply.MaxForgotten{
+			min_fgot = reply.MaxForgotten
+		}
+	}
+	//fmt.Printf("------Min:  %v:%v\n", px.me, reply.MaxForgotten)
+	px.mu.Lock()
+	if ok  && reply.MaxForgotten != -1{
+		for k,_ := range px.Agrees{
+			if k<= min_fgot {
+				delete(px.Agrees, k)
+			}
+		}
+	}
+	px.MinForgotten = min_fgot
+	px.mu.Unlock()
+	return min_fgot+1
 }
 
 //
@@ -167,7 +444,14 @@ func (px *Paxos) Min() int {
 //
 func (px *Paxos) Status(seq int) (Fate, interface{}) {
 	// Your code here.
-	return Pending, nil
+	if seq < px.Min(){
+		return Forgotten, nil
+	}
+	val, exists := px.Agrees[seq]
+	if !exists {
+		return Pending, nil
+	}
+	return val.State, val.V_a
 }
 
 
@@ -216,6 +500,9 @@ func Make(peers []string, me int, rpcs *rpc.Server) *Paxos {
 
 
 	// Your initialization code here.
+	px.Agrees = make(map[int]*Agreement)
+	px.pn = len(peers)
+	px.MinForgotten = -1
 
 	if rpcs != nil {
 		// caller will create socket &c
