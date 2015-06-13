@@ -11,6 +11,7 @@ import "os"
 import "syscall"
 import "encoding/gob"
 import "math/rand"
+import "time"
 
 
 const Debug = 0
@@ -27,6 +28,11 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Operation       string //get, put, append
+	Key             string
+	Value           string
+	UUID            int64          //indicate request itself
+	ID              int64          //indicate the client send this request
 }
 
 type KVPaxos struct {
@@ -38,17 +44,82 @@ type KVPaxos struct {
 	px         *paxos.Paxos
 
 	// Your definitions here.
+	db        map[string]string      //database to store key-value pair
+	uuid      map[int64]int64        //client_id => last request uuid, at-most-once
+	processed_seq   int              //paxos peers processed seq number
 }
 
+func (kv *KVPaxos) ApplySeq(seq int, op Op){
+		if op.Operation == "Put"{
+			kv.db[op.Key] = op.Value
+			//fmt.Printf("Put %v:%v\n",op.Key, op.Value)
+		}else if op.Operation == "Append"{
+			kv.db[op.Key] = kv.db[op.Key] + op.Value
+			//if op.Value=="0" || op.Value=="1" || op.Value=="2"{
+			//	fmt.Printf("cli:%v, uuid: %v, key: %v Value: %v\n",op.ID, op.UUID, op.Key, op.Value)
+			//}
+		}
+		kv.uuid[op.ID] = op.UUID
+		kv.processed_seq=seq
+}
 
 func (kv *KVPaxos) Get(args *GetArgs, reply *GetReply) error {
 	// Your code here.
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	//we don't need to consider the at-most-onec problem in Get
+	//we need to start a paxos instance for this request
+	op := Op{"Get", args.Key, "", args.UUID, args.ID}
+	kv.px.Start(kv.processed_seq+1,op)
+	for {
+		status, val := kv.px.Status(kv.processed_seq+1)
+		if(status == paxos.Pending){
+			time.Sleep(100*time.Millisecond)
+		}else if args.UUID != val.(Op).UUID{
+			kv.ApplySeq(kv.processed_seq+1, val.(Op))
+			kv.px.Start(kv.processed_seq+1,op)
+		}else{
+			value, exists := kv.db[args.Key]
+			if exists {
+				reply.Err = OK
+			}else{
+				reply.Err = ErrNoKey
+			}
+			reply.Value = value
+			kv.uuid[op.ID] = op.UUID
+			kv.processed_seq++
+			break
+		}
+	}
+	kv.px.Done(kv.processed_seq)
+	kv.px.Min()
 	return nil
 }
 
 func (kv *KVPaxos) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 	// Your code here.
-
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if kv.uuid[args.ID] >= args.UUID{
+		return nil
+	}
+	op := Op{args.Op, args.Key, args.Value, args.UUID, args.ID}
+	kv.px.Start(kv.processed_seq+1,op)
+	for {
+		status, val := kv.px.Status(kv.processed_seq+1)
+		if status == paxos.Pending{
+			time.Sleep(100*time.Millisecond)
+		}else if args.UUID != val.(Op).UUID{
+			kv.ApplySeq(kv.processed_seq+1, val.(Op))
+			kv.px.Start(kv.processed_seq+1,op)
+		}else{
+			kv.ApplySeq(kv.processed_seq+1, val.(Op))
+			reply.Err = OK
+			break
+		}
+	}
+	kv.px.Done(kv.processed_seq)
+	kv.px.Min()
 	return nil
 }
 
@@ -92,6 +163,9 @@ func StartServer(servers []string, me int) *KVPaxos {
 
 	kv := new(KVPaxos)
 	kv.me = me
+	kv.processed_seq = 0
+	kv.db = make(map[string]string)
+	kv.uuid = make(map[int64]int64)
 
 	// Your initialization code here.
 

@@ -16,6 +16,8 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	UUID    int64
+	ID      int64
 }
 
 type PutAppendReply struct {
@@ -24,6 +26,8 @@ type PutAppendReply struct {
 
 type GetArgs struct {
 	Key string
+	UUID    int64   //identify request
+	ID      int64   //identify client
 	// You'll have to add definitions here.
 }
 
