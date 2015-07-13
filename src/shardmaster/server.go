@@ -39,6 +39,11 @@ type Op struct {
 	UUID       int64
 }
 
+func nrand() int64 {
+	x := time.Now().UnixNano()
+	return x
+}
+
 func (sm *ShardMaster) ExecuteAction(op Op) {
 	op.UUID = nrand()
 	sm.px.Start(sm.processed_seq+1, op)
@@ -75,86 +80,92 @@ func (sm *ShardMaster) NewConfig() *Config{
 	return &sm.configs[sm.current_config_num]
 }
 
-func (sm *ShardMaster) CountShard(shards [NShards]int64) map[int64][]int {
-	group = map[int64][]int{}
+func (sm *ShardMaster) Rebalance(config *Config, gid int64, after_leave bool) {
+	shards := config.Shards
+	group := map[int64][]int{}
+	group_num := len(config.Groups)
 	for i:=0; i<NShards; i++ {
-		_, exists := group[shards[i]]
-		if exists {
-			append(group[shards[i]], i)
+		if _, exists := group[shards[i]]; exists {
+			group[shards[i]] = append(group[shards[i]], i)
 		}else{
-			arr := make([]int, 1)
-			arr[0] = i
-			group[shards[i]] = arr
+			group[shards[i]] = []int{i}
 		}
 	}
-	return group
+	shards_per_group := NShards/group_num
+	remains_1 := NShards % group_num
+	remains_0 := group_num - remains_1
+	spilled_shards := []int{}
+	if after_leave {
+		spilled_shards = group[gid]
+	}
+	group_need_shards := map[int64]int{}
+	for k, _ := range config.Groups{
+		if len(group[k]) > shards_per_group {
+			over_num := 0
+			if remains_1 != 0 {
+				over_num = len(group[k]) - shards_per_group - 1
+				remains_1--
+			}else{
+				over_num = len(group[k]) - shards_per_group
+				remains_0--
+			}
+			for j:=0;j<over_num;j++ {
+				spilled_shards = append(spilled_shards, group[k][len(group[k])-1-j])
+			}
+		}else if len(group[k]) == shards_per_group {
+			if remains_0 == 0{
+				group_need_shards[k] = 1
+				remains_1--
+			}else{
+				remains_0--
+			}
+		}else{
+			if remains_0 != 0 {
+				group_need_shards[k] = shards_per_group - len(group[k])
+				remains_0--
+			}else{
+				group_need_shards[k] = shards_per_group + 1 -len(group[k])
+				remains_1--
+			}
+		}
+	}
+	
+	used_over_num := 0
+	for k, v:= range group_need_shards {
+		for t:=0;t<v;t++{
+			config.Shards[spilled_shards[t+used_over_num]] = k
+		}
+		used_over_num += v
+	}
 }
 
 func (sm *ShardMaster) ApplyAction(seq int, op Op) {
 	action := op.Action
-	gid = op.GID
+	gid := op.GID
 	if action == "Join" {
-		servers = op.Servers
-		new_config = sm.NewConfig()
+		servers := op.Servers
+		new_config := sm.NewConfig()
 		_, exists := new_config.Groups[gid]
 		if !exists {
 			new_config.Groups[gid] = servers
-			shards_per_group := NShards/len(new_config.Groups)
-			remains_1 := NShards % len(new_config.Groups)
-			remains_0 := len(new_config.Groups) - remains_1
-			group_of_shard := sm.CountShard(new_config.Shards)
 			if len(new_config.Groups) == 1 {
-				for i:=0;i<NShards;i++ {
+				for i:=0;i<NShards;i++{
 					new_config.Shards[i] = gid
 				}
 			}else{
-				for _, v := range(group_of_shard) {
-					over_num := 0
-					if remains_1 == 0 || len(v) == shards_per_group {
-						over_num = len(v) - shards_per_group
-						remains_0--
-					}else{
-						over_num = lne(v) - shards_per_group - 1
-						remains_1--
-					}
-					for j:=0;j<over_num;j++ {
-						new_config.Shards[v[shards_per_group + j]] = gid
-					}
-				}
+				sm.Rebalance(new_config, gid, false)
 			}
 		}
 	}else if action == "Leave" {
-		new_config = sm.NewConfig()
+		new_config := sm.NewConfig()
 		_, exists := new_config.Groups[gid]
 		if exists {
 			delete(new_config.Groups, gid)
-			shards_per_group := NShards/len(new_config.Groups)
-			remains_1 := NShards % len(new_config.Groups)
-			remains_0 := len(new_config.Groups) - remains_1
-			group_of_shard := sm.CountShard(new_config.Shards)
-			t := len(group_of_shard[gid])
-			for i, v := range(group_of_shard) {
-				if i == gid {
-					continue
-				}
-				less_num := 0
-				if remains_1 == 0 {
-					less_num = shards_per_group - len(v)
-					remains_0--
-				}else{
-					less_num = shards_per_group + 1 - len(v)
-					remains_1--
-				}
-				for j:=0;j<less_num;j++ {
-					new_config.Shards[group_of_shard[gid][t-j-1]] = i
-				}
-				t = t - less_num
-			}
+			sm.Rebalance(new_config, gid, true)	
 		}
-
 	}else if action == "Move" {
-		shard = op.shard
-		new_config = sm.NewConfig()
+		shard := op.Shard
+		new_config := sm.NewConfig()
 		_, exists := new_config.Groups[gid]
 		if exists && shard < NShards {
 			new_config.Shards[shard] = gid
@@ -195,7 +206,6 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) error {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	op := Op{Action:"Query", Num: args.Num, UUID:nrand()}
-	reply := QueryReply{}
 	sm.px.Start(sm.processed_seq+1, op)
 	for{
 		status, val := sm.px.Status(sm.processed_seq + 1)
