@@ -1,5 +1,5 @@
 package shardkv
-
+import "shardmaster"
 //
 // Sharded key/value server.
 // Lots of replica groups, each running op-at-a-time paxos.
@@ -13,6 +13,7 @@ const (
 	OK            = "OK"
 	ErrNoKey      = "ErrNoKey"
 	ErrWrongGroup = "ErrWrongGroup"
+	ErrNotReady   = "ErrNotReady"
 )
 
 type Err string
@@ -24,6 +25,8 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	UUID    int64    //identify of this request
+	ID      int64      //identify the client
 
 }
 
@@ -34,6 +37,8 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	UUID    int64    //identify of this request
+	ID      int64    //identify of client
 }
 
 type GetReply struct {
@@ -41,3 +46,13 @@ type GetReply struct {
 	Value string
 }
 
+type PullShardArgs struct {
+	Idx    int
+	Config  shardmaster.Config
+}
+
+type PullShardReply struct {
+	Err   Err
+	DB    map[string]string
+	UUID    map[int64]int64
+}

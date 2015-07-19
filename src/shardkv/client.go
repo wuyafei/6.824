@@ -5,20 +5,19 @@ import "net/rpc"
 import "time"
 import "sync"
 import "fmt"
-import "crypto/rand"
-import "math/big"
+//import "crypto/rand"
+//import "math/big"
 
 type Clerk struct {
 	mu     sync.Mutex // one RPC at a time
 	sm     *shardmaster.Clerk
 	config shardmaster.Config
 	// You'll have to modify Clerk.
+	id    int64    //identify of the client
 }
 
 func nrand() int64 {
-	max := big.NewInt(int64(1) << 62)
-	bigx, _ := rand.Int(rand.Reader, max)
-	x := bigx.Int64()
+	x := time.Now().UnixNano()
 	return x
 }
 
@@ -26,6 +25,7 @@ func MakeClerk(shardmasters []string) *Clerk {
 	ck := new(Clerk)
 	ck.sm = shardmaster.MakeClerk(shardmasters)
 	// You'll have to modify MakeClerk.
+	ck.id = nrand()
 	return ck
 }
 
@@ -87,6 +87,7 @@ func (ck *Clerk) Get(key string) string {
 	defer ck.mu.Unlock()
 
 	// You'll have to modify Get().
+	uuid := nrand()
 
 	for {
 		shard := key2shard(key)
@@ -100,6 +101,8 @@ func (ck *Clerk) Get(key string) string {
 			for _, srv := range servers {
 				args := &GetArgs{}
 				args.Key = key
+				args.UUID = uuid
+				args.ID = ck.id
 				var reply GetReply
 				ok := call(srv, "ShardKV.Get", args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
@@ -124,6 +127,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	defer ck.mu.Unlock()
 
 	// You'll have to modify PutAppend().
+	uuid := nrand()
 
 	for {
 		shard := key2shard(key)
@@ -139,6 +143,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				args.Key = key
 				args.Value = value
 				args.Op = op
+				args.UUID = uuid
+				args.ID = ck.id
 				var reply PutAppendReply
 				ok := call(srv, "ShardKV.PutAppend", args, &reply)
 				if ok && reply.Err == OK {
