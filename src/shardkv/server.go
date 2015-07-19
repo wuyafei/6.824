@@ -80,7 +80,6 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 func (kv *ShardKV) ApplyGet(op Op) (Err, string){
 	var err Err
 	var value string
-	
 	val, exists := kv.db[op.Key]
 	if exists {
 		err = OK
@@ -94,7 +93,15 @@ func (kv *ShardKV) ApplyGet(op Op) (Err, string){
 func (kv *ShardKV) ApplyPutAppend(op Op) (Err, string) {
 	var err Err
 	var value string
-	
+	shard := key2shard(op.Key)
+	if kv.gid != kv.config.Shards[shard]{
+		return  ErrWrongGroup, ""
+	}else{
+		uuid, exists := kv.uuid[op.ID]
+		if exists && op.UUID <= uuid{
+			return OK, ""
+		}
+	}
 	if op.Operation == "Put"{
 		kv.db[op.Key] = op.Value
 	}else if op.Operation == "Append"{
@@ -140,9 +147,8 @@ func (kv *ShardKV) ApplyLog(seq int, op Op) (Err, string){
 	return err, value
 }
 
-func (kv *ShardKV) LogOp(op Op) (Err, string){
+func (kv *ShardKV) CheckOp(op Op) Err {
 	var err Err
-	var value string
 	switch op.Operation{
 	case "Reconfig":
 		if kv.config.Num >= op.Config.Num{
@@ -164,11 +170,22 @@ func (kv *ShardKV) LogOp(op Op) (Err, string){
 			err = ErrWrongGroup
 		}
 	}
+	return err
+}
+
+func (kv *ShardKV) LogOp(op Op) (Err, string){
+	var err Err
+	var value string
+	err = kv.CheckOp(op)
 	if err != "" {
 		return err, value
 	}
 	kv.px.Start(kv.processed_seq+1,op)
 	for {
+		err = kv.CheckOp(op)
+		if err != "" {
+			return err, value
+		}
 		status, val := kv.px.Status(kv.processed_seq+1)
 		if status == paxos.Pending{
 			time.Sleep(10*time.Millisecond)
@@ -229,16 +246,24 @@ func (kv *ShardKV) ReconfigIt(config shardmaster.Config) bool{
 		if config.Shards[i] == kv.gid && old_config.Shards[i] != kv.gid {
 			args := &PullShardArgs{Idx: i, Config: *old_config}
 			reply := &PullShardReply{}
-			for _, server := range old_config.Groups[old_config.Shards[i]] {
-				ok := call(server, "ShardKV.PullShard", args, reply)
-				if ok && reply.Err == OK {
+			for {
+				ok := true
+				for _, server := range old_config.Groups[old_config.Shards[i]] {
+					ok = call(server, "ShardKV.PullShard", args, reply)
+					if ok && reply.Err == OK {
+						break
+					}
+					if ok && reply.Err == ErrNotReady {
+						return false
+					}
+				}
+				merged_reply.Merge(*reply)
+				if ok == false {
+					time.Sleep(100 * time.Millisecond)
+				}else {
 					break
 				}
-				if ok && reply.Err == ErrNotReady {
-					return false
-				}
 			}
-			merged_reply.Merge(*reply)
 		}
 	}
 	op := Op{Operation: "Reconfig", UUID: nrand(), Config: config, ReconfigContent: merged_reply}
